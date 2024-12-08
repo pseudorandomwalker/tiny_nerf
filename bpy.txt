@@ -1,0 +1,276 @@
+import bpy
+import numpy as np
+import os
+import math
+from mathutils import Vector, Matrix
+
+def setup_scene(render_engine='CYCLES', samples=128):
+    """Setup scene parameters while preserving existing objects"""
+    # Set render settings
+    if render_engine.upper() == 'EEVEE':
+        bpy.context.scene.render.engine = 'BLENDER_EEVEE_NEXT'
+    else:
+        bpy.context.scene.render.engine = render_engine.upper()
+    
+    if render_engine.upper() == 'CYCLES':
+        # Cycles-specific settings
+        bpy.context.scene.render.cycles.samples = samples
+        bpy.context.scene.render.cycles.use_denoising = True
+        bpy.context.scene.render.cycles.device = 'GPU'
+        
+        # Optimize for GPU if available
+        if hasattr(bpy.context.preferences.addons['cycles'].preferences, 'compute_device_type'):
+            cycles_prefs = bpy.context.preferences.addons['cycles'].preferences
+            cycles_prefs.compute_device_type = 'CUDA'
+            cycles_prefs.get_devices()
+            
+            for device in cycles_prefs.devices:
+                device.use = True
+    
+    # Improved render settings
+    bpy.context.scene.render.resolution_x = 100
+    bpy.context.scene.render.resolution_y = 100
+    bpy.context.scene.render.image_settings.file_format = 'PNG'
+    bpy.context.scene.render.film_transparent = True
+    
+    # Find lowest point of all objects in the scene
+    lowest_point = 0
+    for obj in bpy.data.objects:
+        if obj.type == 'MESH':
+            world_verts = [obj.matrix_world @ Vector((v.co.x, v.co.y, v.co.z)) for v in obj.data.vertices]
+            if world_verts:
+                min_z = min(v.z for v in world_verts)
+                lowest_point = min(lowest_point, min_z)
+    
+    # Create gray plane if it doesn't exist
+    if 'Ground Plane' not in bpy.data.objects:
+        bpy.ops.mesh.primitive_plane_add(size=2.0, location=(0, 0, lowest_point))
+        plane = bpy.context.active_object
+        plane.name = 'Ground Plane'
+        
+        mat = bpy.data.materials.new(name="Gray_Material")
+        mat.use_nodes = True
+        nodes = mat.node_tree.nodes
+        nodes.clear()
+        
+        diffuse = nodes.new(type='ShaderNodeBsdfDiffuse')
+        diffuse.inputs['Color'].default_value = (0.5, 0.5, 0.5, 1)
+        
+        material_output = nodes.new(type='ShaderNodeOutputMaterial')
+        mat.node_tree.links.new(diffuse.outputs['BSDF'], material_output.inputs['Surface'])
+        
+        plane.data.materials.append(mat)
+    
+    # Create or get camera
+    if 'NeRF Camera' not in bpy.data.objects:
+        bpy.ops.object.camera_add()
+        camera = bpy.context.active_object
+        camera.name = 'NeRF Camera'
+    else:
+        camera = bpy.data.objects['NeRF Camera']
+    
+    # Create target empty at origin if it doesn't exist
+    if 'Camera Target' not in bpy.data.objects:
+        bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0, 0, 0))
+        target = bpy.context.active_object
+        target.name = 'Camera Target'
+    else:
+        target = bpy.data.objects['Camera Target']
+    
+    # Set up camera constraint
+    track_to = None
+    for constraint in camera.constraints:
+        if constraint.type == 'TRACK_TO':
+            track_to = constraint
+            break
+    
+    if not track_to:
+        track_to = camera.constraints.new('TRACK_TO')
+    
+    track_to.target = target
+    track_to.track_axis = 'TRACK_NEGATIVE_Z'
+    track_to.up_axis = 'UP_Y'
+    
+    bpy.context.scene.camera = camera
+    
+    # Check if we need to add lighting
+    if len([obj for obj in bpy.data.objects if obj.type == 'LIGHT']) == 0:
+        bpy.ops.object.light_add(type='SUN', location=(5, 5, 10))
+        # get the light object
+        light_object = bpy.context.object
+
+        # calculate the direction vector
+        target = Vector((0, 0, 0))  # the origin
+        direction = -target + light_object.location
+        direction.normalize()
+
+        # calculate rotation (point light at the origin)
+        light_object.rotation_euler = direction.to_track_quat('Z', 'Y').to_euler()
+        
+        sun = bpy.context.active_object
+        sun.data.energy = 10.0
+    
+    return camera
+
+def get_focal_length():
+    """Calculate the focal length from camera parameters"""
+    camera = bpy.context.scene.camera
+    return 0.5 * bpy.context.scene.render.resolution_x / math.tan(camera.data.angle / 2)
+
+def transform_matrix_blender_to_nerf(matrix):
+    """Convert from Blender to NeRF coordinate system"""
+    transform = Matrix([
+        [-1, 0,  0, 0],
+        [ 0, 0,  1, 0],
+        [ 0, 1,  0, 0],
+        [ 0, 0,  0, 1]
+    ])
+    return transform @ matrix
+
+def create_camera_poses(n_frames=150):
+    """Generate camera poses with varying angles and distances"""
+    poses = []
+    
+    radius_range = [3.0]
+    phi_range = [-30]  # Vertical angles (degrees)
+    
+    frames_per_elevation = n_frames // (len(radius_range) * len(phi_range))
+    theta_steps = np.linspace(0, 360, frames_per_elevation, endpoint=False)
+    
+    for radius in radius_range:
+        for phi in phi_range:
+            for theta in theta_steps:
+                poses.append((radius, theta, phi))
+    
+    return poses[:n_frames]
+
+def position_camera(camera, radius, theta, phi):
+    """Position camera using NeRF conventions"""
+    theta_rad = math.radians(theta)
+    phi_rad = math.radians(-phi)  # Negative phi to match NeRF convention
+    
+    # Convert to Blender coordinates
+    x = radius * math.cos(phi_rad) * math.cos(theta_rad)
+    y = radius * math.cos(phi_rad) * math.sin(theta_rad)
+    z = radius * math.sin(phi_rad)
+    
+    camera.location = Vector((x, y, z))
+    
+    # Update scene
+    bpy.context.view_layer.update()
+
+def get_camera_matrix():
+    """Get camera-to-world transformation matrix"""
+    camera = bpy.context.scene.camera
+    return camera.matrix_world.copy()
+
+def verify_coordinate_system(camera):
+    """Test function to verify coordinate system consistency"""
+    test_poses = [
+        (4.0, 0, 0),    # Front view
+        (4.0, 90, 0),   # Side view
+        (4.0, 0, -30),  # Top view
+    ]
+    
+    results = []
+    for radius, theta, phi in test_poses:
+        # Generate pose
+        position_camera(camera, radius, theta, phi)
+        c2w = get_camera_matrix()
+        c2w_nerf = transform_matrix_blender_to_nerf(c2w)
+        
+        # Convert matrices to numpy for calculations
+        c2w_nerf_np = np.array(c2w_nerf)
+        
+        # Verify camera is pointing at origin
+        look_dir = -c2w_nerf_np[:3, 2]  # Should point toward origin
+        cam_pos = c2w_nerf_np[:3, 3]
+        look_angle = np.arccos(np.dot(-cam_pos, look_dir) / 
+                             (np.linalg.norm(cam_pos) * np.linalg.norm(look_dir)))
+        
+        results.append({
+            'pose': (theta, phi),
+            'camera_position': cam_pos,
+            'look_direction': look_dir,
+            'angle_to_origin': math.degrees(look_angle)
+        })
+    
+    return results
+
+def save_images_and_poses(base_path, camera):
+    """Capture images and save poses for NeRF training"""
+    os.makedirs(base_path, exist_ok=True)
+    render_path = os.path.join(base_path, 'renders')
+    os.makedirs(render_path, exist_ok=True)
+    
+    blend_file_name = bpy.path.basename(bpy.data.filepath)
+    blend_file_name_no_ext = os.path.splitext(blend_file_name)[0]
+    
+    # Initialize arrays
+    poses = []
+    images = []
+    focal_lengths = []
+    camera_poses = create_camera_poses()
+    
+    # First verify coordinate system
+    verification_results = verify_coordinate_system(camera)
+    with open(os.path.join(base_path, 'coordinate_verification.txt'), 'w') as f:
+        for result in verification_results:
+            f.write(f"Pose {result['pose']}:\n")
+            f.write(f"Camera position: {result['camera_position']}\n")
+            f.write(f"Look direction: {result['look_direction']}\n")
+            f.write(f"Angle to origin: {result['angle_to_origin']:.2f}°\n\n")
+    
+    # Capture images and poses
+    for i, (radius, theta, phi) in enumerate(camera_poses):
+        # Position camera
+        position_camera(camera, radius, theta, phi)
+        
+        # Get focal length
+        focal = get_focal_length()
+        focal_lengths.append(focal)
+        
+        # Render image
+        render_path_file = os.path.join(render_path, f'r_{i:03d}.png')
+        bpy.context.scene.render.filepath = render_path_file
+        bpy.ops.render.render(write_still=True)
+        
+        # Get and transform camera pose
+        c2w = get_camera_matrix()
+        c2w_nerf = transform_matrix_blender_to_nerf(c2w)
+        poses.append(np.array(c2w_nerf))
+        
+        # Load rendered image
+        img = bpy.data.images.load(render_path_file)
+        pixels = np.array(img.pixels[:]).reshape((-1, 4))[:, :3]
+        images.append(pixels.reshape((bpy.context.scene.render.resolution_y, 
+                                   bpy.context.scene.render.resolution_x, 3)))
+        
+        print(f'Processed frame {i+1}/{len(camera_poses)}')
+        bpy.data.images.remove(img)  # Clean up loaded image
+    
+    # Save numpy arrays
+    output_npz_file = os.path.join(base_path, f'{blend_file_name_no_ext}_{bpy.context.scene.render.resolution_x}.npz')
+    np.savez(output_npz_file,
+             images=np.array(images),
+             poses=np.array(poses),
+             focal=np.array(focal_lengths))
+    
+    print(f'Saved {len(images)} images and poses to {base_path}')
+    print(f'Coordinate system verification results saved to {base_path}/coordinate_verification.txt')
+
+def main():
+    blend_file_name = bpy.path.basename(bpy.data.filepath)
+    blend_file_name_no_ext = os.path.splitext(blend_file_name)[0]
+    
+    output_path = f"//nerf_dataset/{blend_file_name_no_ext}_100"
+    
+    camera = setup_scene(
+        render_engine='EEVEE',
+        samples=64
+    )
+    
+    save_images_and_poses(bpy.path.abspath(output_path), camera)
+
+if __name__ == "__main__":
+    main()
