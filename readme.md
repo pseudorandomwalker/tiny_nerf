@@ -1,20 +1,28 @@
-# README.md
+# tiny_nerf Installation and Usage Guide
 
-## tiny_nerf
+## Prerequisites
+- A working Conda installation
+- PyTorch installed in your Conda environment
 
-**Requirements:**
-- Conda installation with PyTorch
-
-**Instructions:**
-1. Unzip the provided files
+## Quick Start (Elephant Dataset)
+1. Clone the repository
 2. Navigate to the notebook directory
-3. Run the notebook - it will use the included elephant dataset
+3. Run the notebook - it will use the pre-included elephant dataset by default
 
-**Custom Datasets:**
-- Dataset generation scripts are provided in:
-  - The included .blend file
-  - `bpy.txt`
-- Generate new datasets using either script to match the elephant dataset format
+## Using Custom Datasets
+To use your own 3D models, you'll need to:
+
+1. Generate a dataset in the same format as the elephant dataset using either:
+   - The provided Blender script inside the included .blend file
+   - The standalone script in `bpy.txt`
+
+## Dataset Generation Details
+- The elephant model and its dataset are included in the repository
+- For the elephant dataset, you don't need to generate anything - it's ready to use
+- The Blender script for generating datasets is provided in two formats:
+  - Inside the .blend file
+  - As a separate `bpy.txt` file
+
 
 ## esrgan
 Real-ESRGAN: Training Real-World Blind Super-Resolution with Pure Synthetic Data
