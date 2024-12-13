@@ -1,0 +1,15 @@
+Pose (0, 0):
+Camera position: [-4.  0.  0.]
+Look direction: [ 1. -0. -0.]
+Angle to origin: 0.00°
+
+Pose (90, 0):
+Camera position: [-2.44929371e-16  0.00000000e+00  4.00000000e+00]
+Look direction: [ 6.12323426e-17 -0.00000000e+00 -1.00000000e+00]
+Angle to origin: 0.00°
+
+Pose (0, -30):
+Camera position: [-3.46410155  2.          0.        ]
+Look direction: [ 0.86602539 -0.5        -0.        ]
+Angle to origin: 0.00°
+
